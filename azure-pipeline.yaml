@@ -1,0 +1,207 @@
+trigger:
+  branches:
+    include:
+      - master
+      - main
+
+pr:
+  branches:
+    include:
+      - master
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  buildConfiguration: 'Release'
+  dotnetVersion: '10.0.x'
+  artifactName: 'drop'
+  projectFile: 'OnlineShopApp.csproj'
+
+stages:
+
+# ============================================================
+# BUILD
+# ============================================================
+
+- stage: Build
+  displayName: 'Build ASP.NET Core .NET 10 Application'
+
+  jobs:
+
+  - job: BuildJob
+    displayName: 'Restore Build Publish'
+
+    steps:
+
+    # --------------------------------------------------------
+    # Install .NET 10
+    # --------------------------------------------------------
+
+    - task: UseDotNet@2
+      displayName: 'Install .NET 10 SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '$(dotnetVersion)'
+
+    # --------------------------------------------------------
+    # Display versions
+    # --------------------------------------------------------
+
+    - script: |
+        dotnet --info
+        dotnet --version
+      displayName: 'Verify .NET SDK'
+
+    # --------------------------------------------------------
+    # Clean
+    # --------------------------------------------------------
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Clean'
+      inputs:
+        command: 'custom'
+        custom: 'clean'
+        projects: '$(projectFile)'
+        arguments: '--configuration $(buildConfiguration)'
+
+    # --------------------------------------------------------
+    # Restore
+    # --------------------------------------------------------
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore NuGet Packages'
+      inputs:
+        command: 'restore'
+        projects: '$(projectFile)'
+
+    # --------------------------------------------------------
+    # Build
+    # --------------------------------------------------------
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Build Application'
+      inputs:
+        command: 'build'
+        projects: '$(projectFile)'
+        arguments: >
+          --configuration $(buildConfiguration)
+          --no-restore
+
+    # --------------------------------------------------------
+    # Publish
+    # --------------------------------------------------------
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish Application'
+      inputs:
+        command: 'publish'
+        projects: '$(projectFile)'
+        publishWebProjects: false
+        arguments: >
+          --configuration $(buildConfiguration)
+          --no-build
+          --output $(Build.ArtifactStagingDirectory)/publish
+        zipAfterPublish: true
+
+    # --------------------------------------------------------
+    # Publish Pipeline Artifact
+    # --------------------------------------------------------
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Application Artifact'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/publish'
+        artifact: '$(artifactName)'
+
+
+# ============================================================
+# DEPLOY DEV
+# ============================================================
+
+- stage: Deploy_Dev
+  displayName: 'Deploy to Development'
+  dependsOn: Build
+  condition: succeeded()
+
+  variables:
+    - group: onlineshop-dev-variables
+
+  jobs:
+
+  - deployment: DeployToDev
+    displayName: 'Deploy to onlineshop-dev'
+
+    environment: 'Development'
+
+    strategy:
+      runOnce:
+
+        deploy:
+
+          steps:
+
+          # --------------------------------------------------
+          # Download Artifact
+          # --------------------------------------------------
+
+          - download: current
+            artifact: $(artifactName)
+
+          # --------------------------------------------------
+          # Show package
+          # --------------------------------------------------
+
+          - script: |
+              echo "Deployment package:"
+              find "$(Pipeline.Workspace)/$(artifactName)" -type f -name "*.zip" -print
+            displayName: 'Verify Deployment Artifact'
+
+          # --------------------------------------------------
+          # Deploy to Azure App Service
+          # --------------------------------------------------
+
+          - task: AzureWebApp@1
+            displayName: 'Deploy to Azure App Service - Dev'
+            inputs:
+              azureSubscription: 'Azure-Dev-Subscription'
+              appType: 'webAppLinux'
+              appName: 'onlineshop-dev'
+              package: '$(Pipeline.Workspace)/$(artifactName)/*.zip'
+              runtimeStack: 'DOTNETCORE|10.0'
+              startUpCommand: ''
+
+          # --------------------------------------------------
+          # Configure App Service settings
+          # --------------------------------------------------
+
+          - task: AzureAppServiceSettings@1
+            displayName: 'Configure App Service Settings'
+            inputs:
+              azureSubscription: 'Azure-Dev-Subscription'
+              appName: 'onlineshop-dev'
+
+              appSettings: |
+                [
+                  {
+                    "name": "ASPNETCORE_ENVIRONMENT",
+                    "value": "$(ASPNETCORE_ENVIRONMENT)",
+                    "slotSetting": false
+                  },
+                  {
+                    "name": "ApplyDatabaseMigrations",
+                    "value": "$(ApplyDatabaseMigrations)",
+                    "slotSetting": false
+                  }
+                ]
+
+              connectionStrings: |
+                [
+                  {
+                    "name": "DefaultConnection",
+                    "value": "$(ConnectionStrings__DefaultConnection)",
+                    "type": "SQLAzure",
+                    "slotSetting": false
+                  }
+                ]
